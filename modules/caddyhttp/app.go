@@ -519,7 +519,12 @@ func (app *App) Start() error {
 			// when h2c is enabled but h2 disabled, we already removed h2 from NextProtos
 			// the handshake will never succeed with h2
 			// http2.ConfigureServer will enable the server to handle both h2 and h2c
-			h2server := new(http2.Server)
+			h2server := &http2.Server{
+				MaxConcurrentStreams: 512,
+				ReadIdleTimeout:  30 * time.Second,
+				PingTimeout:      15 * time.Second,
+				WriteByteTimeout: 60 * time.Second,
+			}
 			//nolint:errcheck
 			http2.ConfigureServer(srv.server, h2server)
 		}
