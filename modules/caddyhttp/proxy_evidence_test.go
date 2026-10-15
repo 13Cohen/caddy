@@ -1,0 +1,140 @@
+package caddyhttp
+
+import (
+	"context"
+	"encoding/json"
+	"io"
+	"net"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"syscall"
+	"testing"
+	"time"
+
+	"go.uber.org/zap"
+	"go.uber.org/zap/zaptest/observer"
+	"golang.org/x/net/http2"
+)
+
+func testEvidence(c net.Conn) (*ProxyEvidence, *observer.ObservedLogs) {
+	core, logs := observer.New(zap.InfoLevel)
+	return &ProxyEvidence{Conn: c, id: "anonymous-test", start: time.Now(), logger: zap.New(core), done: make(chan struct{}), ops: make(map[uint64]proxyOperation)}, logs
+}
+
+func TestProxyEvidenceTLSHTTP2CorrelationAndPrivacy(t *testing.T) {
+	core, logs := observer.New(zap.InfoLevel)
+	s := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		p := EnableProxyEvidence(r.Context())
+		if p == nil {
+			t.Error("connection metadata lost through TLS")
+			return
+		}
+		if r.ProtoMajor != 2 {
+			t.Error("test did not use h2")
+		}
+		w.Header().Set("Test-Connection-ID", p.ID())
+		w.Write([]byte("payload-must-not-be-logged"))
+	}))
+	s.Listener = &proxyEvidenceListener{Listener: s.Listener, logger: zap.New(core)}
+	s.Config.ConnContext = withProxyEvidence
+	s.EnableHTTP2 = true
+	s.StartTLS()
+	defer s.Close()
+	tr := &http2.Transport{TLSClientConfig: s.Client().Transport.(*http.Transport).TLSClientConfig}
+	defer tr.CloseIdleConnections()
+	client := &http.Client{Transport: tr, Timeout: 5 * time.Second}
+	ids := []string{}
+	for i := 0; i < 2; i++ {
+		r, err := client.Get(s.URL)
+		if err != nil {
+			t.Fatal(err)
+		}
+		io.Copy(io.Discard, r.Body)
+		r.Body.Close()
+		ids = append(ids, r.Header.Get("Test-Connection-ID"))
+	}
+	if ids[0] == "" || ids[0] != ids[1] {
+		t.Fatal("requests not linked to one connection", ids)
+	}
+	entries := logs.FilterMessage("proxy transport evidence").All()
+	if len(entries) != 1 {
+		t.Fatalf("expected activation once, got %d", len(entries))
+	}
+	fields := entries[0].ContextMap()
+	if fields["connection_id"] != ids[0] {
+		t.Fatal("connection ID mismatch")
+	}
+	if tcp := fields["tcp"].(map[string]any); tcp["available"] != true {
+		t.Fatal("real TCP snapshot unavailable", tcp)
+	}
+	b, _ := json.Marshal(fields)
+	for _, secret := range []string{"payload-must-not-be-logged", "127.0.0.1", "Authorization"} {
+		if strings.Contains(string(b), secret) {
+			t.Fatalf("leaked %s", secret)
+		}
+	}
+	tr.CloseIdleConnections()
+}
+
+func TestProxyEvidenceCapturesPendingSocketWriteAndTimeout(t *testing.T) {
+	a, b := net.Pipe()
+	defer b.Close()
+	p, logs := testEvidence(a)
+	defer p.Close()
+	ctx := context.WithValue(context.Background(), proxyEvidenceKey{}, p)
+	if logs.Len() != 0 {
+		t.Fatal("logged before authentication")
+	}
+	EnableProxyEvidence(ctx)
+	done := p.Begin("trace-test", "response_flush")
+	p.SetWriteDeadline(time.Now().Add(2400 * time.Millisecond))
+	_, err := p.Write([]byte("not-logged"))
+	done(err)
+	if proxyEvidenceError(err) != "timeout" {
+		t.Fatal(err)
+	}
+	p.Close()
+	var pending, timeout, closed bool
+	for _, entry := range logs.All() {
+		f := entry.ContextMap()
+		if f["event"] == "connection_sample" && f["socket_write_pending_ms"] != nil {
+			pending = true
+		}
+		if f["event"] == "socket_write_complete" && f["error_class"] == "timeout" {
+			timeout = true
+		}
+		if f["event"] == "connection_close_called" {
+			closed = true
+			if f["first_write_error"] == nil {
+				t.Fatal("close lost initiating error")
+			}
+		}
+	}
+	if !pending || !timeout || !closed {
+		t.Fatalf("missing evidence pending=%v timeout=%v closed=%v", pending, timeout, closed)
+	}
+}
+
+func TestProxyEvidenceRateLimitRetainsClose(t *testing.T) {
+	a, b := net.Pipe()
+	defer b.Close()
+	p, logs := testEvidence(a)
+	p.active.Store(true)
+	for i := 0; i < 100; i++ {
+		p.emit("operation_slow_complete", nil)
+	}
+	p.Close()
+	last := logs.All()[logs.Len()-1].ContextMap()
+	if last["event"] != "connection_close_called" || last["suppressed_events"].(uint64) == 0 {
+		t.Fatal("close/suppression missing", last)
+	}
+}
+
+func TestProxyEvidenceErrorClassification(t *testing.T) {
+	for err, want := range map[error]string{io.EOF: "eof", syscall.ECONNRESET: "peer_reset", syscall.EPIPE: "broken_pipe", net.ErrClosed: "closed"} {
+		if got := proxyEvidenceError(err); got != want {
+			t.Fatalf("%v: %s", err, got)
+		}
+	}
+}

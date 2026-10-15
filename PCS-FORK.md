@@ -22,3 +22,30 @@ Changes: retain PCS HTTP/2 limits and liveness controls (512 streams, 30 second
 read idle PING, 15 second PONG deadline, 60 second stalled socket write limit).
 The pinned Go/x/net combination already schedules streams round-robin; no new
 cryptographic or frame scheduling implementation is introduced.
+
+
+Transport evidence (pcsproxy3): `PCS_PROXY_EVIDENCE=1` wraps TCP below TLS.
+Only an authenticated forwardproxy `diagnostics` observation enables per-connection
+logging. `EnableProxyEvidence(ctx)` exposes an anonymous random connection ID and
+`Begin(trace, phase)` for bounded slow-operation correlation. The wrapper preserves
+TLS negotiation, deadlines and byte streams. A watchdog logs TCP_INFO every 15s,
+and every second during a slow send; Linux socket snapshots are read-only.
+Initial response/data send operations and raw socket writes share the connection
+ID. Close records retain first read/write error class/errno/time and function names
+(no stack arguments, addresses, headers, credentials or payloads). Close callsite
+is a local path, not a claim about who physically caused a disconnect. An abnormal
+server exit can prevent a close record; bounded logs are not an audit guarantee.
+
+Normal operation is not logged per chunk. Per-connection output is limited to
+12 events/s with a suppression counter; close records bypass that limit. Pending
+operations are bounded at 2048, sampled slow examples at 8. x/net CountError is a
+separate server-scoped category event (no connection ID), capped at 4/s. Exact
+HTTP/2 flow windows are deliberately marked unobserved: a pending application
+Flush without a pending socket Write is insufficient to prove a flow-control bug.
+Kernel TCP snd_wnd is not an HTTP/2 window. TCP counters require per-connection
+deltas; zero windows and retransmissions need contemporaneous correlation.
+
+Tests: TestProxyEvidence exercises real TLS/HTTP2 reuse and TCP_INFO, no payload
+logging, pending socket write / timeout / close, and rate-limit close retention.
+The application listener installs this wrapper before tls.NewListener so Go and
+x/net still see the expected *tls.Conn; it does not replace HTTP/2 or TLS code.

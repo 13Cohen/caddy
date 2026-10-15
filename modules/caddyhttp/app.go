@@ -22,6 +22,7 @@ import (
 	"maps"
 	"net"
 	"net/http"
+	"os"
 	"strconv"
 	"sync"
 	"time"
@@ -491,7 +492,7 @@ func (app *App) Start() error {
 					})
 					ctx = context.WithValue(ctx, tlsConnectionStateFuncCtxKey, getTlsConStateFunc)
 				}
-				return ctx
+				return withProxyEvidence(ctx, c)
 			},
 		}
 
@@ -521,9 +522,12 @@ func (app *App) Start() error {
 			// http2.ConfigureServer will enable the server to handle both h2 and h2c
 			h2server := &http2.Server{
 				MaxConcurrentStreams: 512,
-				ReadIdleTimeout:  30 * time.Second,
-				PingTimeout:      15 * time.Second,
-				WriteByteTimeout: 60 * time.Second,
+				ReadIdleTimeout:      30 * time.Second,
+				PingTimeout:          15 * time.Second,
+				WriteByteTimeout:     60 * time.Second,
+			}
+			if os.Getenv("PCS_PROXY_EVIDENCE") == "1" {
+				h2server.CountError = proxyEvidenceH2ErrorCounter(app.logger.Named("proxy_evidence"))
 			}
 			//nolint:errcheck
 			http2.ConfigureServer(srv.server, h2server)
@@ -590,6 +594,9 @@ func (app *App) Start() error {
 						ln = lnWrapper.WrapListener(ln)
 					}
 
+					if useTLS && os.Getenv("PCS_PROXY_EVIDENCE") == "1" {
+						ln = &proxyEvidenceListener{Listener: ln, logger: app.logger.Named("proxy_evidence")}
+					}
 					if useTLS {
 						// create TLS listener - this enables and terminates TLS
 						ln = tls.NewListener(ln, tlsCfg)
