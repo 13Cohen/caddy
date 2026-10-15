@@ -30,6 +30,9 @@ func TestProxyEvidenceTLSHTTP2CorrelationAndPrivacy(t *testing.T) {
 			t.Error("connection metadata lost through TLS")
 			return
 		}
+		if p.h2Reader.Load() == nil {
+			t.Error("independent reader handle missing through TLS context")
+		}
 		if r.ProtoMajor != 2 {
 			t.Error("test did not use h2")
 		}
@@ -38,6 +41,9 @@ func TestProxyEvidenceTLSHTTP2CorrelationAndPrivacy(t *testing.T) {
 	}))
 	s.Listener = &proxyEvidenceListener{Listener: s.Listener, logger: zap.New(core)}
 	s.Config.ConnContext = withProxyEvidence
+	if err := http2.ConfigureServer(s.Config, &http2.Server{ObserveReadState: proxyObserveH2ReadState}); err != nil {
+		t.Fatal(err)
+	}
 	s.EnableHTTP2 = true
 	s.StartTLS()
 	defer s.Close()
@@ -62,6 +68,9 @@ func TestProxyEvidenceTLSHTTP2CorrelationAndPrivacy(t *testing.T) {
 		t.Fatalf("expected activation once, got %d", len(entries))
 	}
 	fields := entries[0].ContextMap()
+	if fields["h2_reader"] == nil || fields["socket_read"] == nil {
+		t.Fatal("receive fields absent from authenticated event")
+	}
 	if fields["connection_id"] != ids[0] {
 		t.Fatal("connection ID mismatch")
 	}

@@ -4,4 +4,4 @@ package caddyhttp
 
 import "net"
 
-func proxyTCPSnapshot(net.Conn) map[string]any { return map[string]any{"available": false} }
+func proxyTCPSnapshot(net.Conn) map[string]any { return proxyTCPUnavailable("unsupported_platform") }

@@ -83,9 +83,15 @@ type proxyIOError struct {
 // ProxyEvidence is request-accessible transport metadata for one outer TCP
 // connection. Calls do not set deadlines, reset streams or change TLS behavior.
 type ProxyEvidence struct {
-	h2        atomic.Pointer[http2.ServerObservation]
-	h2Events  chan http2.ServerObservation
-	h2Dropped atomic.Uint64
+	h2          atomic.Pointer[http2.ServerObservation]
+	h2Reader    atomic.Pointer[http2.ServerReadState]
+	reads       proxyReadState
+	tcpMu       sync.Mutex
+	tcpCached   map[string]any
+	tcpCaptured time.Time
+	tcpSequence uint64
+	h2Events    chan http2.ServerObservation
+	h2Dropped   atomic.Uint64
 	net.Conn
 	id                    string
 	start                 time.Time
@@ -215,10 +221,12 @@ func proxyEvidenceErrno(err error) int {
 }
 
 func (p *ProxyEvidence) Read(b []byte) (int, error) {
+	p.reads.begin()
 	n, err := p.Conn.Read(b)
+	returned := p.reads.complete(n, proxyEvidenceError(err))
 	if n > 0 {
 		p.readBytes.Add(uint64(n))
-		p.lastRead.Store(time.Now().UnixNano())
+		p.lastRead.Store(returned.UnixNano())
 	}
 	if err != nil {
 		p.mu.Lock()
@@ -364,7 +372,9 @@ func (p *ProxyEvidence) emit(event string, extra []zap.Field) {
 	if state := proxyRuntimeLatest.Load(); state != nil {
 		fields = append(fields, zap.Any("go_runtime", *state))
 	}
-	fields = append(fields, zap.Any("tcp", proxyTCPSnapshot(p.Conn)))
+	tcp, tcpAge := p.tcpSample(event == "connection_close_called")
+	fields = append(fields, zap.Any("tcp", tcp), zap.Float64("tcp_snapshot_age_ms", tcpAge),
+		zap.Any("socket_read", p.reads.snapshot()), zap.Any("h2_reader", p.h2Reader.Load().Snapshot()))
 	p.logger.Info("proxy transport evidence", append(fields, extra...)...)
 }
 
@@ -397,4 +407,13 @@ func (p *ProxyEvidence) Stage(trace, phase string, elapsed time.Duration, err er
 func proxyH2ObservationEnabled(ctx context.Context) bool {
 	p, _ := ctx.Value(proxyEvidenceKey{}).(*ProxyEvidence)
 	return p != nil && p.active.Load()
+}
+
+// Registration transfers only a concurrent-safe metadata handle; it never logs
+// or enables evidence. This occurs once before the HTTP2 reader goroutine starts.
+func proxyObserveH2ReadState(ctx context.Context, state *http2.ServerReadState) {
+	p, _ := ctx.Value(proxyEvidenceKey{}).(*ProxyEvidence)
+	if p != nil {
+		p.h2Reader.CompareAndSwap(nil, state)
+	}
 }

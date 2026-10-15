@@ -532,6 +532,7 @@ func (app *App) Start() error {
 			}
 			if os.Getenv("PCS_PROXY_EVIDENCE") == "1" {
 				h2server.Observe = proxyObserveH2
+				h2server.ObserveReadState = proxyObserveH2ReadState
 				h2server.ObserveEnabled = proxyH2ObservationEnabled
 				h2server.CountError = proxyEvidenceH2ErrorCounter(app.logger.Named("proxy_evidence"))
 			}
