@@ -69,3 +69,21 @@ PING reply timing starts after successful flush, with the existing 60s no-progre
 write deadline preserved. The headers-first scheduler is separately controlled by
 PCS_PROXY_LATENCY=1 and remains an experiment until whole-path validation passes.
 Default environment leaves the scheduler unchanged.
+
+
+## Bounded DATA experiment (pcs/frame-quantum, not deployed)
+
+Requires 13Cohen/net pcs/frame-quantum (9aff5f47). Setting
+`PCS_PROXY_DATA_QUANTUM=16384` opts into a 16 KiB DATA turn with ordinary
+round-robin ordering; unset preserves the current scheduler. This experiment
+takes precedence over PCS_PROXY_LATENCY, which must remain unset in comparisons.
+The flag applies to the HTTP/2 servers configured by this Caddy process.
+TLS, authentication, ACL, padding and health timeouts are unchanged.
+
+Rationale: authenticated production snapshots show positive H2 send windows but
+DATA/socket writes stalled for seconds, delaying other small streams. The peer
+advertises a 16,777,215-byte receive limit; the forwarder can write 64 KiB at once.
+Test with that peer limit and measure actual frame lengths, full payload hashes,
+small-request tail latency, total transfer time and CPU. Smaller frames cannot
+remove retransmission head-of-line blocking already in the TCP connection.
+The integration flag is experimental and is not pinned in the production manifest.

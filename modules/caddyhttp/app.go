@@ -530,6 +530,11 @@ func (app *App) Start() error {
 			if os.Getenv("PCS_PROXY_LATENCY") == "1" {
 				h2server.NewWriteScheduler = http2.NewProxyWriteScheduler
 			}
+			// Experimental, independently opt-in: retain round-robin ordering but
+			// bound DATA turns even when the peer permits very large frames.
+			if os.Getenv("PCS_PROXY_DATA_QUANTUM") == "16384" {
+				h2server.NewWriteScheduler = http2.NewBoundedDataWriteScheduler
+			}
 			if os.Getenv("PCS_PROXY_EVIDENCE") == "1" {
 				h2server.Observe = proxyObserveH2
 				h2server.ObserveEnabled = proxyH2ObservationEnabled
