@@ -521,12 +521,18 @@ func (app *App) Start() error {
 			// the handshake will never succeed with h2
 			// http2.ConfigureServer will enable the server to handle both h2 and h2c
 			h2server := &http2.Server{
-				MaxConcurrentStreams: 512,
-				ReadIdleTimeout:      30 * time.Second,
-				PingTimeout:          15 * time.Second,
-				WriteByteTimeout:     60 * time.Second,
+				MaxConcurrentStreams:  512,
+				ReadIdleTimeout:       30 * time.Second,
+				PingTimeout:           15 * time.Second,
+				WriteByteTimeout:      60 * time.Second,
+				PingTimeoutAfterWrite: true,
+			}
+			if os.Getenv("PCS_PROXY_LATENCY") == "1" {
+				h2server.NewWriteScheduler = http2.NewProxyWriteScheduler
 			}
 			if os.Getenv("PCS_PROXY_EVIDENCE") == "1" {
+				h2server.Observe = proxyObserveH2
+				h2server.ObserveEnabled = proxyH2ObservationEnabled
 				h2server.CountError = proxyEvidenceH2ErrorCounter(app.logger.Named("proxy_evidence"))
 			}
 			//nolint:errcheck

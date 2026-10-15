@@ -49,3 +49,23 @@ Tests: TestProxyEvidence exercises real TLS/HTTP2 reuse and TCP_INFO, no payload
 logging, pending socket write / timeout / close, and rate-limit close retention.
 The application listener installs this wrapper before tls.NewListener so Go and
 x/net still see the expected *tls.Conn; it does not replace HTTP/2 or TLS code.
+
+## pcsproxy4 candidate
+
+Paired with an independent golang/net v0.50.0 fork: Observe/ObserveEnabled transfer
+exact H2 metadata snapshots without logging on the serve goroutine. Auth activation
+is required; normal snapshots are atomic latest values, lifecycle transitions use
+an eight-entry nonblocking queue with explicit drops. Existing per-connection log
+budget/rotation remain. The oldest eight pending streams and current frame stream
+ID join schema-3 forwardproxy trace records. Every record includes snapshot age;
+a delayed serve loop must not masquerade as a current zero window.
+
+Process-wide Go runtime samples every 15s include heap/goroutines/GC cycles and
+CPU counters, scheduler/GC pause cumulative histogram counts (upper-bound bins
+1ms/10ms/100ms/1s/>1s). These repeat across connection records; never sum them as
+per-connection resource consumption. No public debug endpoint is added.
+
+PING reply timing starts after successful flush, with the existing 60s no-progress
+write deadline preserved. The headers-first scheduler is separately controlled by
+PCS_PROXY_LATENCY=1 and remains an experiment until whole-path validation passes.
+Default environment leaves the scheduler unchanged.

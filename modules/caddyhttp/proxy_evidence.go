@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"go.uber.org/zap"
+	"golang.org/x/net/http2"
 )
 
 type proxyEvidenceKey struct{}
@@ -63,7 +64,7 @@ func (l *proxyEvidenceListener) Accept() (net.Conn, error) {
 		return c, nil
 	}
 	p := &ProxyEvidence{Conn: c, id: hex.EncodeToString(id[:]), start: time.Now(), logger: l.logger,
-		done: make(chan struct{}), ops: make(map[uint64]proxyOperation)}
+		done: make(chan struct{}), ops: make(map[uint64]proxyOperation), h2Events: make(chan http2.ServerObservation, 8)}
 	return p, nil
 }
 
@@ -82,6 +83,9 @@ type proxyIOError struct {
 // ProxyEvidence is request-accessible transport metadata for one outer TCP
 // connection. Calls do not set deadlines, reset streams or change TLS behavior.
 type ProxyEvidence struct {
+	h2        atomic.Pointer[http2.ServerObservation]
+	h2Events  chan http2.ServerObservation
+	h2Dropped atomic.Uint64
 	net.Conn
 	id                    string
 	start                 time.Time
@@ -135,6 +139,7 @@ func withProxyEvidence(ctx context.Context, c net.Conn) context.Context {
 func EnableProxyEvidence(ctx context.Context) *ProxyEvidence {
 	p, _ := ctx.Value(proxyEvidenceKey{}).(*ProxyEvidence)
 	if p != nil && p.active.CompareAndSwap(false, true) {
+		startProxyRuntimeEvidence()
 		p.emit("connection_observed", nil)
 		go p.watch()
 	}
@@ -291,6 +296,8 @@ func (p *ProxyEvidence) watch() {
 		select {
 		case <-p.done:
 			return
+		case snapshot := <-p.h2Events:
+			p.emit("h2_lifecycle", []zap.Field{zap.Any("h2_transition", snapshot)})
 		case now := <-ticker.C:
 			ticks++
 			pending := p.writeStart.Load()
@@ -337,9 +344,9 @@ func (p *ProxyEvidence) emit(event string, extra []zap.Field) {
 	}
 	readErr, writeErr := p.readError, p.writeError
 	pendingOps := len(p.ops)
-	suppressed := p.suppressed
+	suppressed := p.suppressed + p.h2Dropped.Load()
 	p.mu.Unlock()
-	fields := []zap.Field{zap.Int("evidence_version", 1), zap.String("event", event), zap.String("connection_id", p.id), zap.Float64("connection_started_unix_ms", float64(p.start.UnixNano())/1e6), zap.Float64("connection_age_ms", float64(now.Sub(p.start))/float64(time.Millisecond)), zap.Bool("close_called", p.closed.Load()), zap.Uint64("socket_read_bytes", p.readBytes.Load()), zap.Uint64("socket_written_bytes", p.writeBytes.Load()), zap.Int("pending_operations", pendingOps), zap.Any("slow_operation_counts", counts), zap.Any("slow_operation_examples", slow), zap.Any("first_read_error", readErr), zap.Any("first_write_error", writeErr), zap.Uint64("suppressed_events", suppressed), zap.String("h2_flow_window", "unobserved")}
+	fields := []zap.Field{zap.Int("evidence_version", 1), zap.String("event", event), zap.String("connection_id", p.id), zap.Float64("connection_started_unix_ms", float64(p.start.UnixNano())/1e6), zap.Float64("connection_age_ms", float64(now.Sub(p.start))/float64(time.Millisecond)), zap.Bool("close_called", p.closed.Load()), zap.Uint64("socket_read_bytes", p.readBytes.Load()), zap.Uint64("socket_written_bytes", p.writeBytes.Load()), zap.Int("pending_operations", pendingOps), zap.Any("slow_operation_counts", counts), zap.Any("slow_operation_examples", slow), zap.Any("first_read_error", readErr), zap.Any("first_write_error", writeErr), zap.Uint64("suppressed_events", suppressed), zap.String("h2_flow_window", "observed_when_h2_snapshot_present")}
 	if start := p.writeStart.Load(); start > 0 {
 		fields = append(fields, zap.Float64("socket_write_pending_ms", float64(now.Sub(time.Unix(0, start)))/float64(time.Millisecond)))
 	}
@@ -351,6 +358,43 @@ func (p *ProxyEvidence) emit(event string, extra []zap.Field) {
 			fields = append(fields, zap.Float64(v.name, float64(now.Sub(time.Unix(0, v.stamp)))/float64(time.Millisecond)))
 		}
 	}
+	if snapshot := p.h2.Load(); snapshot != nil {
+		fields = append(fields, zap.Any("h2", snapshot), zap.Int64("h2_snapshot_age_ms", now.UnixMilli()-snapshot.UnixMS))
+	}
+	if state := proxyRuntimeLatest.Load(); state != nil {
+		fields = append(fields, zap.Any("go_runtime", *state))
+	}
 	fields = append(fields, zap.Any("tcp", proxyTCPSnapshot(p.Conn)))
 	p.logger.Info("proxy transport evidence", append(fields, extra...)...)
+}
+
+// proxyObserveH2 never logs on the HTTP2 serve goroutine. Snapshot ownership is
+// transferred; all fields are copied scalars and a bounded immutable slice.
+func proxyObserveH2(ctx context.Context, snapshot http2.ServerObservation) {
+	p, _ := ctx.Value(proxyEvidenceKey{}).(*ProxyEvidence)
+	if p == nil || !p.active.Load() {
+		return
+	}
+	p.h2.Store(&snapshot)
+	if snapshot.Event != "sample" {
+		select {
+		case p.h2Events <- snapshot:
+		default:
+			p.h2Dropped.Add(1)
+		}
+	}
+}
+
+// Stage records bounded metadata from a DNS/dial operation, never an address.
+func (p *ProxyEvidence) Stage(trace, phase string, elapsed time.Duration, err error, fields ...zap.Field) {
+	if p == nil {
+		return
+	}
+	extra := []zap.Field{zap.String("trace_id", trace), zap.String("phase", phase), zap.Float64("stage_duration_ms", float64(elapsed)/float64(time.Millisecond)), zap.String("error_class", proxyEvidenceError(err)), zap.Int("errno", proxyEvidenceErrno(err))}
+	p.emit("proxy_stage_complete", append(extra, fields...))
+}
+
+func proxyH2ObservationEnabled(ctx context.Context) bool {
+	p, _ := ctx.Value(proxyEvidenceKey{}).(*ProxyEvidence)
+	return p != nil && p.active.Load()
 }

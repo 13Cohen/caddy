@@ -138,3 +138,32 @@ func TestProxyEvidenceErrorClassification(t *testing.T) {
 		}
 	}
 }
+
+func TestProxyEvidenceH2ObserverNonblockingAndAuthentication(t *testing.T) {
+	a, b := net.Pipe()
+	defer b.Close()
+	p, _ := testEvidence(a)
+	defer p.Close()
+	p.h2Events = make(chan http2.ServerObservation, 1)
+	ctx := context.WithValue(context.Background(), proxyEvidenceKey{}, p)
+	proxyObserveH2(ctx, http2.ServerObservation{Event: "ping_queued"})
+	if p.h2.Load() != nil {
+		t.Fatal("observed unauthenticated connection")
+	}
+	p.active.Store(true)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := 0; i < 1000; i++ {
+			proxyObserveH2(ctx, http2.ServerObservation{Event: "ping_ack", Sequence: uint64(i)})
+		}
+	}()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("observer blocked serve loop")
+	}
+	if p.h2.Load().Sequence != 999 || p.h2Dropped.Load() != 999 {
+		t.Fatal("latest snapshot or suppression lost")
+	}
+}
