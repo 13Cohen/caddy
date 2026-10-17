@@ -414,6 +414,9 @@ func (app *App) Provision(ctx caddy.Context) error {
 
 // Validate ensures the app's configuration is valid.
 func (app *App) Validate() error {
+	if _, err := proxyWriteSchedulerFromEnv(os.Getenv("PCS_PROXY_LATENCY"), os.Getenv("PCS_PROXY_DATA_QUANTUM")); err != nil {
+		return err
+	}
 	lnAddrs := make(map[string]string)
 
 	for srvName, srv := range app.Servers {
@@ -468,6 +471,10 @@ func removeTLSALPN(srv *Server, target string) {
 // Start runs the app. It finishes automatic HTTPS if enabled,
 // including management of certificates.
 func (app *App) Start() error {
+	proxyScheduler, err := proxyWriteSchedulerFromEnv(os.Getenv("PCS_PROXY_LATENCY"), os.Getenv("PCS_PROXY_DATA_QUANTUM"))
+	if err != nil {
+		return err
+	}
 	// get a logger compatible with http.Server
 	serverLogger, err := zap.NewStdLogAt(app.logger.Named("stdlib"), zap.DebugLevel)
 	if err != nil {
@@ -527,9 +534,7 @@ func (app *App) Start() error {
 				WriteByteTimeout:      60 * time.Second,
 				PingTimeoutAfterWrite: true,
 			}
-			if os.Getenv("PCS_PROXY_LATENCY") == "1" {
-				h2server.NewWriteScheduler = http2.NewProxyWriteScheduler
-			}
+			h2server.NewWriteScheduler = proxyScheduler
 			if os.Getenv("PCS_PROXY_EVIDENCE") == "1" {
 				h2server.Observe = proxyObserveH2
 				h2server.ObserveReadState = proxyObserveH2ReadState
