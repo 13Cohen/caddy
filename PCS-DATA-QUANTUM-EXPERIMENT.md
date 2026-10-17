@@ -24,11 +24,30 @@ The full v1 matrix completed 28 runs across six profiles with exact payload veri
 
 The verified-TLS, explicitly quantum-enabled single-outer lifecycle test passed normally (0.443 seconds) and under race (2.695 seconds): an incomplete large stream is canceled, a concurrent and subsequent exact small response both complete on the same outer connection, and outer close releases another pending large handler. Full HTTP2/HPACK, targeted scheduler race, Caddy proxy tests and corrected-environment forwardproxy off/on tests also passed. The initial forwardproxy ACL failure caused by missing offline host fixtures is preserved; it was not a production-source defect or a silently discarded run.
 
-A first-wave set-level analysis still showed 3.228–3.999 seconds (roughly 3.5 seconds) after all small-response Flush calls returned before the earliest client completion. Fresh H2 samples no longer contained those pending small requests, but TCP queues remained and ACKs advanced. This is not a per-stream causal join and does not establish packet-loss origin. The prepared v2 2×2 plan crosses q0/q16384 with isolated-namespace notsent-lowat 65536/16384 and adds exact synthetic lane correlation. **Its benefit is not yet proved.** It does not change this branch's default or production settings.
+A first-wave set-level analysis still showed 3.228–3.999 seconds (roughly 3.5 seconds) after all small-response Flush calls returned before the earliest client completion. Fresh H2 samples no longer contained those pending small requests, but TCP queues remained and ACKs advanced. This is not a per-stream causal join and does not establish packet-loss origin. This v1 result is retained unchanged alongside the later complete v2 and calibration records below.
+
+## Completed v2 and independent fixture calibration
+
+All 56 v2 screening runs completed: 16 main runs and eight for each of five controls. The same server binary was used in every cell with exact synthetic lane correlation. Main client-completion P95 is the median of four per-run P95 values per cell:
+
+| Cell | Quantum / notsent-lowat (bytes) | Main P95 (seconds) | Change versus A |
+| --- | --- | ---: | ---: |
+| A | 0 / 65536 | 6.0214719115 | baseline |
+| B | 16384 / 65536 | 5.7510812235 | -4.49% |
+| C | 0 / 16384 | 7.2305740535 | +20.08% |
+| D | 16384 / 16384 | 5.0137469345 | -16.74% |
+
+No candidate reached the 30% improvement gate: **no accepted winner**. The two high-bandwidth profiles were additionally **resource-INCONCLUSIVE** because 15/16 runs exceeded the predeclared 10% quota-throttling limit (8/8 `high-multi4`, 7/8 `high-single-bulk`). They cannot be recorded as performance passes. The lowat intervention affects all experiment sockets in the namespace, including client/origin; it does not isolate only the outer server socket.
+
+A separate four-run ON/OFF/OFF/ON loopback offload calibration fixed cell A and the same server source/binary. All payload, effective GSO/TSO/GRO read-back and quota checks passed, with zero measured quota throttling. Nevertheless, its primary residual-queue measure, same-snapshot `SendQ - notsent`, increased from 55748 to 72038 bytes (OFF/ON 1.292208, +29.22%); both pairs increased. It failed the predeclared 50% reduction requirement. The secondary P95 decrease of 10.49% (7.382466084 → 6.6078501365 seconds) does not prove aggregation was the primary cause. The subtraction is not proof of physical wire delivery, and changing the offload group cannot distinguish each feature's effect. **GSO is not an established main cause.**
+
+The compared production median RTT was approximately 159 milliseconds; the loopback shaped model frequently observed 1–3 seconds. The configured netem delay is not equivalent to measured RTT or an exact production replica. These fixture results do not establish production-user speed or reliability benefits. Original v1/v2 outcomes are preserved; the candidate remains **HOLD with no production release**. Functional/TLS/race passes and performance acceptance remain separate.
+
+The sanitized acceptance bundle is collected in PCS at `caddy/monitor/results/20261017/data-1115`. This update adds only documentation; no new scheduling behavior, production setting, source pin or default-branch merge is included.
 
 ## Tested runtime identity
 
-The actual v1 binary SHA256 is `ee3b8c4c8baad0ce3658ca9187f00e0039d810a8be8898f4796f284036555781`. Runtime Go files in this review commit exactly match the recorded build-source manifest:
+The actual v1 binary SHA256 is `ee3b8c4c8baad0ce3658ca9187f00e0039d810a8be8898f4796f284036555781`. The runtime-bearing review commits remain Caddy `938007e8d8adf1111da2a48421c7e10ad3df3282` and net `fb6fa2d0c533aeb7eb7d61b40372d8b547c1ac87`; later documentation commits are separate provenance fields. Runtime Go files still exactly match the recorded build-source manifest:
 
 | File | SHA256 |
 | --- | --- |
@@ -36,6 +55,6 @@ The actual v1 binary SHA256 is `ee3b8c4c8baad0ce3658ca9187f00e0039d810a8be8898f4
 | `modules/caddyhttp/proxy_data_quantum.go` | `081962880d24bdff3dd0c13a8286e563cbb3b5eb0adcfa3e38bfefe10d24a617` |
 | Companion net `http2/writesched_roundrobin.go` | `af1a17d431827eb8eedf6f26edc98813a42591e0cd99c7366a99c94422a51f0f` |
 
-The companion net review commit is [`fb6fa2d0c533aeb7eb7d61b40372d8b547c1ac87`](https://github.com/justinchen13/net/commit/fb6fa2d0c533aeb7eb7d61b40372d8b547c1ac87); this is a source reference, not a dependency-pin or production update.
+The companion net tested-runtime review commit is [`fb6fa2d0c533aeb7eb7d61b40372d8b547c1ac87`](https://github.com/justinchen13/net/commit/fb6fa2d0c533aeb7eb7d61b40372d8b547c1ac87); this is a source reference, not a dependency-pin or production update.
 
 The root retains `loop-20261017T1753Z/candidate-source-sha256.json`, `functional-validation.json`, all 28 v1 run records and the TLS lifecycle logs. This commit only publishes the experiment source, tests and review documentation. It does not update dependency pins, PCS deployment manifests, production images or the default branch. No tests or load experiments were rerun for this documentation/publish step.
